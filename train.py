@@ -105,7 +105,7 @@ def main(config):
   # 'ta': meta-train accuracy
   # 'vl': meta-val loss
   # 'va': meta-val accuracy
-  aves_keys = ['tl', 'ta', 'vl', 'va']
+  aves_keys = ['tl', 'ta', 'vl', 'va', 'align_pre', 'align_post']
   trlog = dict()
   for k in aves_keys:
     trlog[k] = []
@@ -136,7 +136,16 @@ def main(config):
 
       optimizer.zero_grad(set_to_none=True)  # NEW (daha verimli)
       with amp.autocast('cuda'):  # NEW
-          logits = model(x_shot, x_query, y_shot, inner_args, meta_train=True)
+          logits, metrics = model(
+              x_shot, x_query, y_shot, inner_args,
+              meta_train=True,
+              y_query=y_query,
+              return_metrics=True
+          )
+          if metrics['align_pre_mean'] is not None:
+              aves['align_pre'].update(metrics['align_pre_mean'], 1)
+          if metrics['align_post_mean'] is not None:
+              aves['align_post'].update(metrics['align_post_mean'], 1)
           logits = logits.flatten(0, 1)
           labels = y_query.flatten()
 
@@ -209,9 +218,11 @@ def main(config):
       str(epoch), aves['tl'], aves['ta'])
     writer.add_scalars('loss', {'meta-train': aves['tl']}, epoch)
     writer.add_scalars('acc', {'meta-train': aves['ta']}, epoch)
-
+    writer.add_scalar('alignment/align_pre', aves['align_pre'], epoch)
+    writer.add_scalar('alignment/align_post', aves['align_post'], epoch)
     if eval_val:
-      log_str += ', meta-val {:.4f}|{:.4f}'.format(aves['vl'], aves['va'])
+      log_str = 'epoch {}, meta-train {:.4f}|{:.4f}, align {:.4f}|{:.4f}'.format(
+            str(epoch), aves['tl'], aves['ta'], aves['align_pre'], aves['align_post'])
       writer.add_scalars('loss', {'meta-val': aves['vl']}, epoch)
       writer.add_scalars('acc', {'meta-val': aves['va']}, epoch)
 

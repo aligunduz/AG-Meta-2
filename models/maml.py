@@ -189,7 +189,7 @@ class MAML(Module):
         
     return params
 
-  def forward(self, x_shot, x_query, y_shot, inner_args, meta_train):
+  def forward(self, x_shot, x_query, y_shot, inner_args, meta_train, y_query=None, return_metrics=False):
     """
     Args:
       x_shot (float tensor, [n_episode, n_way * n_shot, C, H, W]): support sets.
@@ -206,7 +206,8 @@ class MAML(Module):
     assert self.classifier is not None
     assert x_shot.dim() == 5 and x_query.dim() == 5
     assert x_shot.size(0) == x_query.size(0)
-
+    align_pre_list = []
+    align_post_list = []
     # a dictionary of parameters that will be updated in the inner loop
     #AGAG Gereksiz yani gradyanı hesaplanmayacak parametrelerin çıkartılması
     params = OrderedDict(self.named_parameters())
@@ -224,14 +225,73 @@ class MAML(Module):
         for m in self.modules():
           if isinstance(m, BatchNorm2d) and not m.is_episodic():
             m.eval()
+
+      g_sup_pre = None
+      # PRE alignment
+      if return_metrics and (y_query is not None):
+          with torch.enable_grad():
+              logits_sup_pre = self._inner_forward(x_shot[ep], params, ep)
+              loss_sup_pre = F.cross_entropy(logits_sup_pre, y_shot[ep])
+
+              logits_qry_pre = self._inner_forward(x_query[ep], params, ep)
+              loss_qry_pre = F.cross_entropy(logits_qry_pre, y_query[ep])
+
+              param_list = list(params.values())
+              g_sup_pre = self._get_grads_from_loss(loss_sup_pre, param_list, retain_graph=False)
+              g_qry_pre = self._get_grads_from_loss(loss_qry_pre, param_list, retain_graph=False)
+
+              align_pre = self._cosine_between_grad_lists(g_sup_pre, g_qry_pre)
+              align_pre_list.append(align_pre.item())
       updated_params = self._adapt(  #AGAG Modelin inner loop'u -> θ′=θ−α∇θLsupport
         x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train)
       # inner-loop validation
-      with torch.set_grad_enabled(meta_train):
+      grad_ctx = torch.enable_grad() if (return_metrics and (y_query is not None)) else torch.set_grad_enabled(meta_train)
+      with grad_ctx:
         self.eval()
         logits_ep = self._inner_forward(x_query[ep], updated_params, ep)
+        if return_metrics and (y_query is not None):
+            loss_qry_post = F.cross_entropy(logits_ep, y_query[ep])
+            g_qry_post = self._get_grads_from_loss(
+                loss_qry_post,
+                list(updated_params.values()),
+                retain_graph=meta_train
+            )
+
+            align_post = self._cosine_between_grad_lists(g_sup_pre, g_qry_post)
+            align_post_list.append(align_post.item())
       logits.append(logits_ep)
 
     self.train(meta_train)
     logits = torch.stack(logits)
+    if return_metrics:
+        metrics = {
+            'align_pre_mean': sum(align_pre_list) / len(align_pre_list) if len(align_pre_list) > 0 else None,
+            'align_post_mean': sum(align_post_list) / len(align_post_list) if len(align_post_list) > 0 else None,
+        }
+        return logits, metrics
     return logits
+
+  #AGAG ALIGNMENT LOGLARI İÇİN EKLENEN FONKSİYONLAR
+  def _get_grads_from_loss(self, loss, params, retain_graph=False):
+      grads = autograd.grad(
+          loss,
+          params,
+          retain_graph=retain_graph,
+          create_graph=False,
+          allow_unused=True
+      )
+      out = []
+      for p, g in zip(params, grads):
+          if g is None:
+              out.append(torch.zeros_like(p).detach())
+          else:
+              out.append(g.detach())
+      return out
+
+  def _flatten_grads(self, grads):
+      return torch.cat([g.reshape(-1) for g in grads])
+
+  def _cosine_between_grad_lists(self, grads1, grads2, eps=1e-12):
+      v1 = self._flatten_grads(grads1)
+      v2 = self._flatten_grads(grads2)
+      return F.cosine_similarity(v1, v2, dim=0, eps=eps)
