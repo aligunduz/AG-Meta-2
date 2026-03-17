@@ -281,7 +281,7 @@ class MAML(Module):
               g_sup_pre = self._get_grads_from_loss(
                   loss_sup_pre,
                   param_list,
-                  retain_graph=False,
+                  retain_graph=keep_sup_grad_graph,
                   create_graph=keep_sup_grad_graph,
                   detach_grads=(not keep_sup_grad_graph)
               )
@@ -291,7 +291,7 @@ class MAML(Module):
               g_qry_pre = self._get_grads_from_loss(
                   loss_qry_pre,
                   param_list,
-                  retain_graph=False,
+                  retain_graph=do_alignment_pre_loss,
                   create_graph=do_alignment_pre_loss,
                   detach_grads=(not do_alignment_pre_loss)
               )
