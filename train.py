@@ -42,7 +42,27 @@ def main(config):
   utils.set_log_path(ckpt_path)
   writer = SummaryWriter(os.path.join(ckpt_path, 'tensorboard'))
   yaml.dump(config, open(os.path.join(ckpt_path, 'config.yaml'), 'w'))
+  # Alignment log açık mı?
   log_alignment = config.get('log_alignment', False)
+
+  # Pre-alignment loss kullanılacak mı?
+  use_alignment_pre_loss = config.get('use_alignment_pre_loss', False)
+
+  # Post-alignment loss kullanılacak mı?
+  use_alignment_post_loss = config.get('use_alignment_post_loss', False)
+
+  # Pre-alignment loss ağırlığı (eta)
+  alignment_pre_weight = config.get('alignment_pre_weight', 0.0)
+
+  # Post-alignment loss ağırlığı (eta)
+  alignment_post_weight = config.get('alignment_post_weight', 0.0)
+  # Modelden alignment çıktısı almamız gerekiyor mu?
+  # Log açık olabilir, pre-loss açık olabilir, post-loss açık olabilir.
+  need_alignment_outputs = (
+      log_alignment or
+      use_alignment_pre_loss or
+      use_alignment_post_loss
+  )
   ##### Dataset #####
 
   # meta-train
@@ -138,16 +158,28 @@ def main(config):
 
       optimizer.zero_grad(set_to_none=True)  # NEW (daha verimli)
       with amp.autocast('cuda'):  # NEW
-          if log_alignment:
+          # Alignment ile ilgili herhangi bir şey açıksa
+          # modeli metrics dönecek şekilde çağırıyoruz.
+          if need_alignment_outputs:
               logits, metrics = model(
-                  x_shot, x_query, y_shot, inner_args,
+                  x_shot,
+                  x_query,
+                  y_shot,
+                  inner_args,
                   meta_train=True,
                   y_query=y_query,
-                  return_metrics=True
+                  return_metrics=True,
+                  use_alignment_pre_loss=use_alignment_pre_loss,
+                  use_alignment_post_loss=use_alignment_post_loss,
+                  alignment_pre_weight=alignment_pre_weight,
+                  alignment_post_weight=alignment_post_weight
               )
           else:
               logits = model(
-                  x_shot, x_query, y_shot, inner_args,
+                  x_shot,
+                  x_query,
+                  y_shot,
+                  inner_args,
                   meta_train=True
               )
               metrics = None
@@ -162,13 +194,27 @@ def main(config):
           pred = torch.argmax(logits, dim=-1)
           acc = utils.compute_acc(pred, labels)
           loss = F.cross_entropy(logits, labels)
+          # Toplam alignment cezasını burada ana loss'a ekliyoruz.
+          # Başlangıçta sıfır kabul ediyoruz.
+          align_loss_total = 0.0
 
-      if not did_viz:
-          from torchviz import make_dot
-          # AMP bloğunun DIŞINDA çağır
-          dot = make_dot(loss, params=dict(model.named_parameters()))
-          dot.save("maml_graph.dot")
-          did_viz = True
+          # Pre-alignment loss aktifse ekle
+          if metrics is not None and metrics['align_pre_loss_mean'] is not None:
+              align_loss_total = align_loss_total + metrics['align_pre_loss_mean']
+
+          # Post-alignment loss aktifse ekle
+          if metrics is not None and metrics['align_post_loss_mean'] is not None:
+              align_loss_total = align_loss_total + metrics['align_post_loss_mean']
+
+          # Final outer loss = query CE loss + alignment cezası
+          loss = loss + align_loss_total
+
+      # if not did_viz:
+      #     from torchviz import make_dot
+      #     # AMP bloğunun DIŞINDA çağır
+      #     dot = make_dot(loss, params=dict(model.named_parameters()))
+      #     dot.save("maml_graph.dot")
+      #     did_viz = True
 
       ##AGAG Burada theta'yı güncelliyoruz.
       ##AGAG backward ile varolan önceki güncellemeleri de hesaba katarak theta güncellenir.

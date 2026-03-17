@@ -189,7 +189,20 @@ class MAML(Module):
         
     return params
 
-  def forward(self, x_shot, x_query, y_shot, inner_args, meta_train, y_query=None, return_metrics=False):
+  def forward(
+          self,
+          x_shot,
+          x_query,
+          y_shot,
+          inner_args,
+          meta_train,
+          y_query=None,
+          return_metrics=False,
+          use_alignment_pre_loss=False,  # pre-alignment loss aktif mi?
+          use_alignment_post_loss=False,  # post-alignment loss aktif mi?
+          alignment_pre_weight=0.0,  # pre-alignment loss katsayısı (eta)
+          alignment_post_weight=0.0  # post-alignment loss katsayısı (eta)
+  ):
     """
     Args:
       x_shot (float tensor, [n_episode, n_way * n_shot, C, H, W]): support sets.
@@ -206,6 +219,25 @@ class MAML(Module):
     assert self.classifier is not None
     assert x_shot.dim() == 5 and x_query.dim() == 5
     assert x_shot.size(0) == x_query.size(0)
+
+    # Alignment metrik/log hesaplaması yapılacak mı?
+    # Bunun için hem return_metrics açık olmalı hem de query etiketleri gelmiş olmalı.
+    do_alignment_log = return_metrics and (y_query is not None)
+
+    # Pre-alignment loss gerçekten train loss'una eklenecek mi?
+    # Sadece meta-train sırasında anlamlı.
+    do_alignment_pre_loss = use_alignment_pre_loss and meta_train and (y_query is not None)
+
+    # Post-alignment loss gerçekten train loss'una eklenecek mi?
+    # Sadece meta-train sırasında anlamlı.
+    do_alignment_post_loss = use_alignment_post_loss and meta_train and (y_query is not None)
+
+    # Epoch boyunca episode bazlı pre-alignment loss değerlerini tutacağız.
+    align_pre_loss_list = []
+
+    # Epoch boyunca episode bazlı post-alignment loss değerlerini tutacağız.
+    align_post_loss_list = []
+
     align_pre_list = []
     align_post_list = []
     # a dictionary of parameters that will be updated in the inner loop
@@ -227,9 +259,14 @@ class MAML(Module):
             m.eval()
 
       g_sup_pre = None
-      # PRE alignment
-      if return_metrics and (y_query is not None):
+      # PRE alignment bloğuna gerçekten ihtiyaç var mı?
+      # - log alacaksak lazım
+      # - pre-loss kullanacaksak lazım
+      # - post-loss kullanacaksak support gradient'ini daha sonra da kullanacağız
+      need_pre_block = do_alignment_log or do_alignment_pre_loss or do_alignment_post_loss
+      if need_pre_block:
           with torch.enable_grad():
+              # Support ve query loss'larını başlangıç parametresi (theta) üzerinde hesaplıyoruz.
               logits_sup_pre = self._inner_forward(x_shot[ep], params, ep)
               loss_sup_pre = F.cross_entropy(logits_sup_pre, y_shot[ep])
 
@@ -237,28 +274,83 @@ class MAML(Module):
               loss_qry_pre = F.cross_entropy(logits_qry_pre, y_query[ep])
 
               param_list = list(params.values())
-              g_sup_pre = self._get_grads_from_loss(loss_sup_pre, param_list, retain_graph=False)
-              g_qry_pre = self._get_grads_from_loss(loss_qry_pre, param_list, retain_graph=False)
 
+              # Support gradient'i:
+              # Eğer pre-loss veya post-loss kullanacaksak graph korunmalı.
+              keep_sup_grad_graph = do_alignment_pre_loss or do_alignment_post_loss
+              g_sup_pre = self._get_grads_from_loss(
+                  loss_sup_pre,
+                  param_list,
+                  retain_graph=False,
+                  create_graph=keep_sup_grad_graph,
+                  detach_grads=(not keep_sup_grad_graph)
+              )
+
+              # Query-pre gradient'i:
+              # Sadece pre-loss aktifse graph'lı tutmamız gerekir.
+              g_qry_pre = self._get_grads_from_loss(
+                  loss_qry_pre,
+                  param_list,
+                  retain_graph=False,
+                  create_graph=do_alignment_pre_loss,
+                  detach_grads=(not do_alignment_pre_loss)
+              )
+
+              # PRE alignment cosine değeri
               align_pre = self._cosine_between_grad_lists(g_sup_pre, g_qry_pre)
-              align_pre_list.append(align_pre.item())
+
+              # Sadece log açıksa metriği kaydet
+              if do_alignment_log:
+                  align_pre_list.append(align_pre.detach().item())
+
+              # Sadece pre-loss açıksa ceza terimini oluştur
+              # Omega_align_pre = eta * (1 - cos)
+              if do_alignment_pre_loss:
+                  align_pre_loss = alignment_pre_weight * (1.0 - align_pre)
+                  align_pre_loss_list.append(align_pre_loss)
       updated_params = self._adapt(  #AGAG Modelin inner loop'u -> θ′=θ−α∇θLsupport
         x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train)
       # inner-loop validation
-      grad_ctx = torch.enable_grad() if (return_metrics and (y_query is not None)) else torch.set_grad_enabled(meta_train)
-      with grad_ctx:
-        self.eval()
-        logits_ep = self._inner_forward(x_query[ep], updated_params, ep)
-        if return_metrics and (y_query is not None):
-            loss_qry_post = F.cross_entropy(logits_ep, y_query[ep])
-            g_qry_post = self._get_grads_from_loss(
-                loss_qry_post,
-                list(updated_params.values()),
-                retain_graph=meta_train
-            )
+      # Query tarafında gradient gerekip gerekmediğini belirliyoruz.
+      # - log alacaksak lazım
+      # - post-loss kullanacaksak da lazım
+      need_post_block = do_alignment_log or do_alignment_post_loss
 
-            align_post = self._cosine_between_grad_lists(g_sup_pre, g_qry_post)
-            align_post_list.append(align_post.item())
+      # Eğer post alignment hesaplanacaksa burada mutlaka grad açık olmalı.
+      # Aksi halde query gradient'ini çıkaramayız.
+      grad_ctx = torch.enable_grad() if need_post_block else torch.set_grad_enabled(meta_train)
+      # inner-loop validation / query evaluation
+      with grad_ctx:
+          self.eval()
+          logits_ep = self._inner_forward(x_query[ep], updated_params, ep)
+
+          # POST alignment bloğuna ihtiyaç var mı?
+          if need_post_block:
+              # Query loss'unu support update sonrası parametreler (theta') üzerinde hesaplıyoruz.
+              loss_qry_post = F.cross_entropy(logits_ep, y_query[ep])
+
+              # Post-loss aktifse gradient graph'ını korumamız gerekir.
+              g_qry_post = self._get_grads_from_loss(
+                  loss_qry_post,
+                  list(updated_params.values()),
+                  retain_graph=meta_train,
+                  create_graph=do_alignment_post_loss,
+                  detach_grads=(not do_alignment_post_loss)
+              )
+
+              # POST alignment cosine değeri:
+              # support'taki başlangıç gradient'i ile update sonrası query gradient'ini karşılaştırıyoruz.
+              align_post = self._cosine_between_grad_lists(g_sup_pre, g_qry_post)
+
+              # Sadece log açıksa metriği kaydet
+              if do_alignment_log:
+                  align_post_list.append(align_post.detach().item())
+
+              # Sadece post-loss açıksa ceza terimini oluştur
+              # Omega_align_post = eta * (1 - cos)
+              if do_alignment_post_loss:
+                  align_post_loss = alignment_post_weight * (1.0 - align_post)
+                  align_post_loss_list.append(align_post_loss)
       logits.append(logits_ep)
 
     self.train(meta_train)
@@ -267,25 +359,52 @@ class MAML(Module):
         metrics = {
             'align_pre_mean': sum(align_pre_list) / len(align_pre_list) if len(align_pre_list) > 0 else None,
             'align_post_mean': sum(align_post_list) / len(align_post_list) if len(align_post_list) > 0 else None,
+
+            # Şimdilik bilgi amaçlı döndürüyoruz.
+            # Train.py tarafında ister loglarız ister loss'a ekleriz.
+            'align_pre_loss_mean': torch.stack(align_pre_loss_list).mean() if len(align_pre_loss_list) > 0 else None,
+            'align_post_loss_mean': torch.stack(align_post_loss_list).mean() if len(align_post_loss_list) > 0 else None,
         }
         return logits, metrics
     return logits
 
   #AGAG ALIGNMENT LOGLARI İÇİN EKLENEN FONKSİYONLAR
-  def _get_grads_from_loss(self, loss, params, retain_graph=False):
+  def _get_grads_from_loss(
+          self,
+          loss,
+          params,
+          retain_graph=False,
+          create_graph=False,
+          detach_grads=True
+  ):
+      """
+      Bir loss'tan gradient listesi çıkarır.
+
+      Args:
+        loss: türev alınacak loss değeri.
+        params: gradient'i alınacak parametre listesi.
+        retain_graph: mevcut graph sonradan tekrar kullanılacak mı?
+        create_graph: gradient'in de türevini alabilmek için graph oluşturulsun mu?
+        detach_grads: sadece log/metric için kullanıyorsak gradient'i graph'tan kopar.
+                      Loss olarak kullanacaksak False olmalı.
+      """
       grads = autograd.grad(
           loss,
           params,
           retain_graph=retain_graph,
-          create_graph=False,
+          create_graph=create_graph,
           allow_unused=True
       )
+
       out = []
       for p, g in zip(params, grads):
+          # Bazı parametreler için grad None gelebilir.
+          # Bu durumda aynı boyutta sıfır tensor koyuyoruz.
           if g is None:
-              out.append(torch.zeros_like(p).detach())
+              z = torch.zeros_like(p)
+              out.append(z.detach() if detach_grads else z)
           else:
-              out.append(g.detach())
+              out.append(g.detach() if detach_grads else g)
       return out
 
   def _flatten_grads(self, grads):
