@@ -38,5 +38,5 @@ inner_args:
 optimizer: adam
 optimizer_args:
   lr: 0.001
-
+log_alignment: true
 epoch: 100
