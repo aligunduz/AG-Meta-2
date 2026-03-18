@@ -279,11 +279,9 @@ def main(config):
         writer.add_scalar('alignment/align_post', aves['align_post'], epoch)
     if eval_val:
       if log_alignment:
-            log_str = 'epoch {}, meta-train {:.4f}|{:.4f}, align {:.4f}|{:.4f}'.format(
-                str(epoch), aves['tl'], aves['ta'], aves['align_pre'], aves['align_post'])
+          log_str += ', meta-val {:.4f}|{:.4f}, align {:.4f}|{:.4f}'.format(aves['vl'], aves['va'], aves['align_pre'], aves['align_post'])
       else:
-            log_str = 'epoch {}, meta-train {:.4f}|{:.4f}'.format(
-                str(epoch), aves['tl'], aves['ta'])
+          log_str += ', meta-val {:.4f}|{:.4f}'.format(aves['vl'], aves['va'])
       writer.add_scalars('loss', {'meta-val': aves['vl']}, epoch)
       writer.add_scalars('acc', {'meta-val': aves['va']}, epoch)
 
