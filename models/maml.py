@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.autograd as autograd
 import torch.utils.checkpoint as cp
@@ -55,6 +56,10 @@ def load(ckpt, load_clf=False, clf_name=None, clf_args=None):
       clf_args['in_dim'] = enc.get_out_dim()
       clf = classifiers.make(clf_name, **clf_args)
   model = MAML(enc, clf)
+  if 'gradient_transport_state_dict' in ckpt:
+      model.gradient_transport_logits.load_state_dict(
+          ckpt['gradient_transport_state_dict']
+      )
   return model
 
 
@@ -63,17 +68,34 @@ class MAML(Module):
     super(MAML, self).__init__()
     self.encoder = encoder
     self.classifier = classifier
+    # Her katman için 1 öğrenilebilir gate logit'i
+    self.gradient_transport_logits = nn.ParameterDict()
+
+    # Encoder katmanları
+    for name, _ in self.encoder.named_parameters():
+      key = 'encoder__' + name.replace('.', '__')
+      self.gradient_transport_logits[key] = nn.Parameter(torch.tensor(4.0))
+
+    # Classifier katmanları
+    for name, _ in self.classifier.named_parameters():
+      key = 'classifier__' + name.replace('.', '__')
+      self.gradient_transport_logits[key] = nn.Parameter(torch.tensor(4.0))
 
   def reset_classifier(self):
     self.classifier.reset_parameters()
 
+  def get_gradient_transport_gates(self):
+      out = {}
+      for key, logit in self.gradient_transport_logits.items():
+          out[key] = torch.sigmoid(logit).detach().item()
+      return out
   def _inner_forward(self, x, params, episode):
     """ Forward pass for the inner loop. """
     feat = self.encoder(x, get_child_dict(params, 'encoder'), episode)
     logits = self.classifier(feat, get_child_dict(params, 'classifier'))
     return logits
 
-  def _inner_iter(self, x, y, params, mom_buffer, episode, inner_args, detach):
+  def _inner_iter(self, x, y, params, mom_buffer, episode, inner_args, detach,use_gradient_transport=False):
     """ 
     Performs one inner-loop iteration of MAML including the forward and 
     backward passes and the parameter update.
@@ -117,14 +139,20 @@ class MAML(Module):
             lr = inner_args['classifier_lr']
           else:
             raise ValueError('invalid parameter name')
-          updated_param = param - lr * grad  #AGAG θi′=θi−α∇θiLsupport(θ)
+          if use_gradient_transport:
+              gate_key = name.replace('.', '__')
+              gate = torch.sigmoid(self.gradient_transport_logits[gate_key])
+              transported_grad = gate * grad
+              updated_param = param - lr * transported_grad
+          else:
+              updated_param = param - lr * grad  #AGAG θi′=θi−α∇θiLsupport(θ)
         if detach:
           updated_param = updated_param.detach().requires_grad_(True)
         updated_params[name] = updated_param
 
     return updated_params, mom_buffer
 
-  def _adapt(self, x, y, params, episode, inner_args, meta_train):
+  def _adapt(self, x, y, params, episode, inner_args, meta_train,use_gradient_transport=False):
     """
     Performs inner-loop adaptation in MAML.
 
@@ -171,7 +199,7 @@ class MAML(Module):
       detach = not torch.is_grad_enabled()  # detach graph in the first pass
       self.is_first_pass(detach)
       params, mom_buffer = self._inner_iter(
-        x, y, params, mom_buffer, int(episode), inner_args, detach)
+        x, y, params, mom_buffer, int(episode), inner_args, detach, use_gradient_transport=use_gradient_transport)
       state = tuple(t if t.requires_grad else t.clone().requires_grad_(True)
         for t in tuple(params.values()) + tuple(mom_buffer.values()))
       return state
@@ -185,7 +213,7 @@ class MAML(Module):
           zip(mom_buffer_keys, state[-len(mom_buffer_keys):]))
       else:
         params, mom_buffer = self._inner_iter( #AGAG task için tek bir iterasyon
-          x, y, params, mom_buffer, episode, inner_args, not meta_train)
+          x, y, params, mom_buffer, episode, inner_args, not meta_train,use_gradient_transport=use_gradient_transport)
         
     return params
 
@@ -201,7 +229,8 @@ class MAML(Module):
           use_alignment_pre_loss=False,  # pre-alignment loss aktif mi?
           use_alignment_post_loss=False,  # post-alignment loss aktif mi?
           alignment_pre_weight=0.0,  # pre-alignment loss katsayısı (eta)
-          alignment_post_weight=0.0  # post-alignment loss katsayısı (eta)
+          alignment_post_weight=0.0,  # post-alignment loss katsayısı (eta)
+          use_gradient_transport=False
   ):
     """
     Args:
@@ -245,7 +274,7 @@ class MAML(Module):
     params = OrderedDict(self.named_parameters())
     for name in list(params.keys()):
       if not params[name].requires_grad or \
-        any(s in name for s in inner_args['frozen'] + ['temp']):
+        any(s in name for s in inner_args['frozen'] + ['temp', 'gradient_transport_logits']):
         params.pop(name)
 
     logits = []
@@ -309,7 +338,7 @@ class MAML(Module):
                   align_pre_loss = alignment_pre_weight * (1.0 - align_pre)
                   align_pre_loss_list.append(align_pre_loss)
       updated_params = self._adapt(  #AGAG Modelin inner loop'u -> θ′=θ−α∇θLsupport
-        x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train)
+        x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train, use_gradient_transport=use_gradient_transport)
       # inner-loop validation
       # Query tarafında gradient gerekip gerekmediğini belirliyoruz.
       # - log alacaksak lazım

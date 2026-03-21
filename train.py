@@ -63,6 +63,8 @@ def main(config):
       use_alignment_pre_loss or
       use_alignment_post_loss
   )
+
+  use_gradient_transport = config.get('use_gradient_transport', False)
   ##### Dataset #####
 
   # meta-train
@@ -172,7 +174,8 @@ def main(config):
                   use_alignment_pre_loss=use_alignment_pre_loss,
                   use_alignment_post_loss=use_alignment_post_loss,
                   alignment_pre_weight=alignment_pre_weight,
-                  alignment_post_weight=alignment_post_weight
+                  alignment_post_weight=alignment_post_weight,
+                  use_gradient_transport=use_gradient_transport
               )
           else:
               logits = model(
@@ -180,7 +183,8 @@ def main(config):
                   x_query,
                   y_shot,
                   inner_args,
-                  meta_train=True
+                  meta_train=True,
+                  use_gradient_transport=use_gradient_transport
               )
               metrics = None
           if log_alignment and metrics is not None:
@@ -247,7 +251,7 @@ def main(config):
             model.reset_classifier()
 
         with torch.no_grad(), amp.autocast('cuda'):  # NEW (val’de de AMP aç)
-            logits = model(x_shot, x_query, y_shot, inner_args, meta_train=False)
+            logits = model(x_shot, x_query, y_shot, inner_args, meta_train=False, use_gradient_transport=use_gradient_transport)
             logits = logits.flatten(0, 1)
             labels = y_query.flatten()
 
@@ -264,6 +268,17 @@ def main(config):
       aves[k] = avg.item()
       trlog[k].append(aves[k])
 
+    gate_mean = None
+    if use_gradient_transport:
+        model_for_log = model.module if config.get('_parallel') else model
+        gates = model_for_log.get_gradient_transport_gates()
+        gate_mean = sum(gates.values()) / len(gates)
+
+        writer.add_scalar('gradient_transport/gate_mean', gate_mean, epoch)
+
+        for gate_name, gate_value in gates.items():
+            writer.add_scalar(f'gradient_transport/{gate_name}', gate_value, epoch)
+
     t_epoch = utils.time_str(timer_epoch.end())
     t_elapsed = utils.time_str(timer_elapsed.end())
     t_estimate = utils.time_str(timer_elapsed.end() / 
@@ -272,6 +287,8 @@ def main(config):
     # formats output
     log_str = 'epoch {}, meta-train {:.4f}|{:.4f}'.format(
       str(epoch), aves['tl'], aves['ta'])
+    if use_gradient_transport and gate_mean is not None:
+        log_str += ', gate_mean {:.4f}'.format(gate_mean)
     writer.add_scalars('loss', {'meta-train': aves['tl']}, epoch)
     writer.add_scalars('acc', {'meta-train': aves['ta']}, epoch)
     if log_alignment:
@@ -315,7 +332,7 @@ def main(config):
       'classifier': config['classifier'],
       'classifier_args': config['classifier_args'],
       'classifier_state_dict': model_.classifier.state_dict(),
-
+      'gradient_transport_state_dict': model_.gradient_transport_logits.state_dict(),
       'training': training,
     }
 
