@@ -73,7 +73,7 @@ def main(config):
     train_set[0][0].shape, len(train_set), train_set.n_classes))
   train_loader = DataLoader(
     train_set, config['train']['n_episode'],
-    collate_fn=datasets.collate_fn, num_workers=12, pin_memory=True,prefetch_factor=4,persistent_workers=True)
+    collate_fn=datasets.collate_fn, num_workers=8, pin_memory=True,prefetch_factor=4,persistent_workers=True)
 
   # meta-val
   eval_val = False
@@ -84,7 +84,7 @@ def main(config):
       val_set[0][0].shape, len(val_set), val_set.n_classes))
     val_loader = DataLoader(
       val_set, config['val']['n_episode'],
-      collate_fn=datasets.collate_fn, num_workers=8, pin_memory=True,prefetch_factor=4,persistent_workers=True)
+      collate_fn=datasets.collate_fn, num_workers=4, pin_memory=True,prefetch_factor=4,persistent_workers=True)
   
   ##### Model and Optimizer #####
 
@@ -225,7 +225,8 @@ def main(config):
       scaler.scale(loss).backward()  # NEW
       scaler.unscale_(optimizer)  # NEW (clip öncesi gerekli)
       for param in optimizer.param_groups[0]['params']:
-          nn.utils.clip_grad_value_(param, 10)
+          if param.grad is not None:
+              nn.utils.clip_grad_value_(param, 10)
       scaler.step(optimizer)  # NEW
       scaler.update()  # NEW
 
