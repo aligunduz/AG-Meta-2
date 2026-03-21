@@ -39,7 +39,7 @@ optimizer_args:
   lr: 0.001
 
 
-log_alignment: true
+log_alignment: false
 use_alignment_pre_loss: false
 use_alignment_post_loss: false
 alignment_pre_weight: 0.1
