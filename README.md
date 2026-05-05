@@ -58,32 +58,79 @@ Unfortunately, some insights discussed in the original paper and its follow-up w
 
 **Environment**
 
-- Python 3.6.8 (or any Python 3 distribution)
-- PyTorch 1.3.1 (or any PyTorch > 1.0)
+- Python 3.6.8 or newer
+- PyTorch 1.3.1 or newer
+- torchvision
 - tensorboardX
+- PyYAML
+- tqdm
+- scipy
+- Pillow
+- torchviz
+
+On Google Colab, start with a GPU runtime and install the extra packages that
+are not already available in the notebook environment:
+```
+pip install pyyaml tensorboardX torchviz tqdm scipy pillow
+```
 
 **Datasets**
 
 Please follow the download links [here](https://github.com/cyvius96/few-shot-meta-baseline). Please modify the file names accordingly so that they can be recognized by the data loaders.
 
+By default, the data loaders look under the lowercase `materials/` directory:
+```
+materials/
+  mini-imagenet/
+    train_phase_train.pickle
+    val.pickle
+    train_phase_test.pickle
+  omniglot/
+    train_phase_train.pickle
+    val.pickle
+    train_phase_test.pickle
+```
+
+If your dataset is stored somewhere else in Colab or Drive, add `root_path`
+inside each split block in the config file, for example under `train`, `val`,
+or `test`.
+
 **Configurations**
 
-Template configuration files as well as those for reproducing the results in the original paper can be found in `configs/`. The hyperparameters are self-explanatory.
+Template configuration files as well as those for reproducing the results in
+the original paper can be found in `configs/`. Configs are organized by
+encoder, dataset, and task setting:
+```
+configs/convnet4/<dataset>/<task>/<train_or_test>_<template_or_reproduce>.yaml
+```
+
+For example:
+```
+configs/convnet4/mini-imagenet/5_way_1_shot/train_reproduce.yaml
+configs/convnet4/mini-imagenet/5_way_1_shot/test_reproduce.yaml
+configs/convnet4/mini-imagenet/5_way_5_shot/train_reproduce.yaml
+configs/convnet4/mini-imagenet/5_way_5_shot/test_reproduce.yaml
+```
 
 ### 1. Training MAML
 Here is the command for single-GPU training of MAML with ConvNet4 backbone for 5-way-1-shot classification on mini-ImageNet to reproduce the result in the original paper.
 ```
-python train.py --config=configs/convnet4/mini-imagenet/train_reproduce.yaml
+python train.py --config=configs/convnet4/mini-imagenet/5_way_1_shot/train_reproduce.yaml
 ```
 
 Use `-gpu` to specify available GPUs for multi-GPU training. For example,
 ```
-python train.py --config=configs/convnet4/mini-imagenet/train_reproduce.yaml --gpu=0,1
+python train.py --config=configs/convnet4/mini-imagenet/5_way_1_shot/train_reproduce.yaml --gpu=0,1
 ```
 
 Add `-efficient` to enable gradient checkpointing. This aggressively saves GPU memory while slightly increases running time.
 ```
-python train.py --config=configs/convnet4/mini-imagenet/train_reproduce.yaml --efficient
+python train.py --config=configs/convnet4/mini-imagenet/5_way_1_shot/train_reproduce.yaml --efficient
+```
+
+For the 5-way-5-shot setup, use:
+```
+python train.py --config=configs/convnet4/mini-imagenet/5_way_5_shot/train_reproduce.yaml
 ```
 
 Use `-tag` to customize the name of the directory where the checkpoints and log files are saved.
@@ -91,7 +138,12 @@ Use `-tag` to customize the name of the directory where the checkpoints and log 
 ### 2. Testing MAML
 Here is how one would test MAML for 5-way-1-shot classification on mini-ImageNet to reproduce the result in the original paper. Please confirm the loading path first.
 ```
-python test.py --config=configs/convnet4/mini-imagenet/test_reproduce.yaml
+python test.py --config=configs/convnet4/mini-imagenet/5_way_1_shot/test_reproduce.yaml
+```
+
+For the 5-way-5-shot setup, use:
+```
+python test.py --config=configs/convnet4/mini-imagenet/5_way_5_shot/test_reproduce.yaml
 ```
 
 The `-gpu` and `-efficient` tags function similarly as in training.

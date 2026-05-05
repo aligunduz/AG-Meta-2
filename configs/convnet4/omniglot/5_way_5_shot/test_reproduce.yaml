@@ -20,4 +20,5 @@ inner_args:
   frozen:
     - bn
 
+use_gradient_transport: false
 epoch: 10

@@ -34,6 +34,10 @@ def main(config):
 
   ckpt = torch.load(config['load'])
   inner_args = utils.config_inner_args(config.get('inner_args'))
+  ckpt_config = ckpt.get('config', {})
+  use_gradient_transport = config.get(
+    'use_gradient_transport',
+    ckpt_config.get('use_gradient_transport', False))
   model = models.load(ckpt, load_clf=(not inner_args['reset_classifier']))
 
   if args.efficient:
@@ -43,6 +47,16 @@ def main(config):
     model = nn.DataParallel(model)
 
   utils.log('num params: {}'.format(utils.compute_n_params(model)))
+  utils.log('gradient transport: {}'.format(
+    'enabled' if use_gradient_transport else 'disabled'))
+  if use_gradient_transport:
+    if 'gradient_transport_state_dict' not in ckpt:
+      utils.log('warning: checkpoint has no gradient transport gates; using initialized gate values')
+    model_for_log = model.module if config.get('_parallel') else model
+    gates = model_for_log.get_gradient_transport_gates()
+    if len(gates) > 0:
+      gate_mean = sum(gates.values()) / len(gates)
+      utils.log('gradient transport gate_mean: {:.4f}'.format(gate_mean))
 
   ##### Evaluation #####
 
@@ -66,13 +80,21 @@ def main(config):
           model.reset_classifier()
 
       with amp.autocast('cuda'):  # NEW
-          logits = model(x_shot, x_query, y_shot, inner_args, meta_train=False)
+          logits = model(
+            x_shot,
+            x_query,
+            y_shot,
+            inner_args,
+            meta_train=False,
+            use_gradient_transport=use_gradient_transport)
           logits = logits.view(-1, config['test']['n_way'])
           labels = y_query.view(-1)
 
           pred = torch.argmax(logits, dim=1)
           acc = utils.compute_acc(pred, labels)
-      # logits = model(x_shot, x_query, y_shot, inner_args, meta_train=False)
+      # logits = model(
+      #   x_shot, x_query, y_shot, inner_args, meta_train=False,
+      #   use_gradient_transport=use_gradient_transport)
       # logits = logits.view(-1, config['test']['n_way'])
       # labels = y_query.view(-1)
       #
