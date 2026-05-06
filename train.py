@@ -137,6 +137,10 @@ def main(config):
   aves_keys = ['tl', 'ta', 'vl', 'va']
   if log_alignment:
       aves_keys += ['align_pre', 'align_post']
+  if task_gate_args.get('enabled', False):
+      aves_keys += ['eff_gate', 'eff_gate_min', 'eff_gate_max', 'task_signal']
+      if task_gate_args.get('gamma_l2_weight', 0.0) > 0:
+          aves_keys += ['gamma_l2']
   trlog = dict()
   for k in aves_keys:
     trlog[k] = []
@@ -166,6 +170,7 @@ def main(config):
           model.reset_classifier()
 
       optimizer.zero_grad(set_to_none=True)  # NEW (daha verimli)
+      gamma_l2_loss = None
       with amp.autocast('cuda'):  # NEW
           # Alignment ile ilgili herhangi bir şey açıksa
           # modeli metrics dönecek şekilde çağırıyoruz.
@@ -196,6 +201,14 @@ def main(config):
                   task_gate_args=task_gate_args
               )
               metrics = None
+          if task_gate_args.get('enabled', False):
+              model_for_stats = model.module if config.get('_parallel') else model
+              task_gate_stats = model_for_stats.get_task_gate_stats()
+              if task_gate_stats is not None:
+                  aves['eff_gate'].update(task_gate_stats['effective_gate_mean'], 1)
+                  aves['eff_gate_min'].update(task_gate_stats['effective_gate_min'], 1)
+                  aves['eff_gate_max'].update(task_gate_stats['effective_gate_max'], 1)
+                  aves['task_signal'].update(task_gate_stats['task_signal_mean'], 1)
           if log_alignment and metrics is not None:
               if metrics['align_pre_mean'] is not None:
                   aves['align_pre'].update(metrics['align_pre_mean'], 1)
@@ -222,6 +235,13 @@ def main(config):
           # Final outer loss = query CE loss + alignment cezası
           loss = loss + align_loss_total
 
+          if task_gate_args.get('enabled', False):
+              gamma_l2_weight = task_gate_args.get('gamma_l2_weight', 0.0)
+              if gamma_l2_weight > 0:
+                  model_for_loss = model.module if config.get('_parallel') else model
+                  gamma_l2_loss = gamma_l2_weight * model_for_loss.task_gate_gamma_l2()
+                  loss = loss + gamma_l2_loss
+
       # if not did_viz:
       #     from torchviz import make_dot
       #     # AMP bloğunun DIŞINDA çağır
@@ -242,6 +262,8 @@ def main(config):
 
       aves['tl'].update(loss.item(), 1)
       aves['ta'].update(acc, 1)
+      if gamma_l2_loss is not None:
+          aves['gamma_l2'].update(gamma_l2_loss.detach().item(), 1)
       
 
     # meta-val
@@ -304,6 +326,12 @@ def main(config):
 
             writer.add_scalar('task_gate/gamma_mean', gamma_mean, epoch)
             writer.add_scalar('task_gate/gamma_abs_mean', gamma_abs_mean, epoch)
+            writer.add_scalar('task_gate/effective_gate_mean', aves['eff_gate'], epoch)
+            writer.add_scalar('task_gate/effective_gate_min', aves['eff_gate_min'], epoch)
+            writer.add_scalar('task_gate/effective_gate_max', aves['eff_gate_max'], epoch)
+            writer.add_scalar('task_gate/task_signal_mean', aves['task_signal'], epoch)
+            if 'gamma_l2' in aves:
+                writer.add_scalar('task_gate/gamma_l2_loss', aves['gamma_l2'], epoch)
 
             for gamma_name, gamma_value in gammas.items():
                 writer.add_scalar(f'task_gate/{gamma_name}', gamma_value, epoch)
@@ -320,6 +348,14 @@ def main(config):
         log_str += ', gate_mean {:.4f}'.format(gate_mean)
     if gamma_abs_mean is not None:
         log_str += ', gamma_abs_mean {:.4f}'.format(gamma_abs_mean)
+    if task_gate_args.get('enabled', False):
+        log_str += ', eff_gate {:.4f}|{:.4f}|{:.4f}, signal {:.4f}'.format(
+            aves['eff_gate'],
+            aves['eff_gate_min'],
+            aves['eff_gate_max'],
+            aves['task_signal'])
+        if 'gamma_l2' in aves:
+            log_str += ', gamma_l2 {:.6f}'.format(aves['gamma_l2'])
     writer.add_scalars('loss', {'meta-train': aves['tl']}, epoch)
     writer.add_scalars('acc', {'meta-train': aves['ta']}, epoch)
     if log_alignment:

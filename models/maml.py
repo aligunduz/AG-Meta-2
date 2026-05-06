@@ -88,6 +88,8 @@ class MAML(Module):
       self.gradient_transport_logits[key] = nn.Parameter(torch.tensor(4.0))
       self.task_gate_gammas[key] = nn.Parameter(torch.tensor(0.0))
 
+    self._task_gate_stats = None
+
   def reset_classifier(self):
     self.classifier.reset_parameters()
 
@@ -102,6 +104,53 @@ class MAML(Module):
       for key, gamma in self.task_gate_gammas.items():
           out[key] = gamma.detach().item()
       return out
+
+  def task_gate_gamma_l2(self):
+      if len(self.task_gate_gammas) == 0:
+          device = next(self.parameters()).device
+          return torch.tensor(0., device=device)
+      penalties = [gamma.pow(2) for gamma in self.task_gate_gammas.values()]
+      return torch.stack(penalties).mean()
+
+  def reset_task_gate_stats(self):
+      self._task_gate_stats = {
+          'effective_gate_sum': 0.0,
+          'effective_gate_min': None,
+          'effective_gate_max': None,
+          'task_signal_sum': 0.0,
+          'count': 0,
+      }
+
+  def get_task_gate_stats(self):
+      stats = self._task_gate_stats
+      if stats is None or stats['count'] == 0:
+          return None
+
+      count = stats['count']
+      return {
+          'effective_gate_mean': stats['effective_gate_sum'] / count,
+          'effective_gate_min': stats['effective_gate_min'],
+          'effective_gate_max': stats['effective_gate_max'],
+          'task_signal_mean': stats['task_signal_sum'] / count,
+      }
+
+  def _record_task_gate_stats(self, gate, gate_signal):
+      if self._task_gate_stats is None:
+          return
+
+      gate_value = gate.detach().float().mean().item()
+      signal_value = gate_signal.detach().float().mean().item()
+      stats = self._task_gate_stats
+      stats['effective_gate_sum'] += gate_value
+      stats['task_signal_sum'] += signal_value
+      stats['count'] += 1
+
+      if stats['effective_gate_min'] is None:
+          stats['effective_gate_min'] = gate_value
+          stats['effective_gate_max'] = gate_value
+      else:
+          stats['effective_gate_min'] = min(stats['effective_gate_min'], gate_value)
+          stats['effective_gate_max'] = max(stats['effective_gate_max'], gate_value)
 
   def _inner_forward(self, x, params, episode):
     """ Forward pass for the inner loop. """
@@ -171,9 +220,12 @@ class MAML(Module):
               if task_gate_args.get('enabled', False):
                   gate_signal = self._compute_task_gate_signal(
                       gate_signal_grad, gate_logit, task_gate_args)
+                  gamma_scale = task_gate_args.get('gamma_scale', 1.0)
                   gate_logit = gate_logit + \
-                      self.task_gate_gammas[gate_key] * gate_signal
+                      gamma_scale * self.task_gate_gammas[gate_key] * gate_signal
               gate = torch.sigmoid(gate_logit)
+              if task_gate_args.get('enabled', False) and not detach:
+                  self._record_task_gate_stats(gate, gate_signal)
               transported_grad = gate * grad
               updated_param = param - lr * transported_grad
           else:
@@ -297,6 +349,11 @@ class MAML(Module):
     assert x_shot.dim() == 5 and x_query.dim() == 5
     assert x_shot.size(0) == x_query.size(0)
     task_gate_args = task_gate_args or {}
+    if task_gate_args.get('enabled', False) and \
+      task_gate_args.get('collect_stats', True):
+      self.reset_task_gate_stats()
+    else:
+      self._task_gate_stats = None
 
     # Alignment metrik/log hesaplaması yapılacak mı?
     # Bunun için hem return_metrics açık olmalı hem de query etiketleri gelmiş olmalı.

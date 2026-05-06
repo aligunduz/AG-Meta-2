@@ -162,4 +162,18 @@ def config_task_gate_args(config):
   task_gate_args['normalize_by_numel'] = task_gate_args.get(
     'normalize_by_numel', True)
 
+  if 'task_gate_gamma_scale' in config:
+    task_gate_args['gamma_scale'] = config['task_gate_gamma_scale']
+  task_gate_args['gamma_scale'] = task_gate_args.get('gamma_scale', 1.0)
+
+  if 'task_gate_gamma_l2_weight' in config:
+    task_gate_args['gamma_l2_weight'] = \
+      config['task_gate_gamma_l2_weight']
+  task_gate_args['gamma_l2_weight'] = task_gate_args.get(
+    'gamma_l2_weight', 0.0)
+
+  if 'task_gate_collect_stats' in config:
+    task_gate_args['collect_stats'] = config['task_gate_collect_stats']
+  task_gate_args['collect_stats'] = task_gate_args.get('collect_stats', True)
+
   return task_gate_args
