@@ -60,6 +60,10 @@ def load(ckpt, load_clf=False, clf_name=None, clf_args=None):
       model.gradient_transport_logits.load_state_dict(
           ckpt['gradient_transport_state_dict']
       )
+  if 'task_gate_gamma_state_dict' in ckpt:
+      model.task_gate_gammas.load_state_dict(
+          ckpt['task_gate_gamma_state_dict']
+      )
   return model
 
 
@@ -70,16 +74,19 @@ class MAML(Module):
     self.classifier = classifier
     # Her katman için 1 öğrenilebilir gate logit'i
     self.gradient_transport_logits = nn.ParameterDict()
+    self.task_gate_gammas = nn.ParameterDict()
 
     # Encoder katmanları
     for name, _ in self.encoder.named_parameters():
       key = 'encoder__' + name.replace('.', '__')
       self.gradient_transport_logits[key] = nn.Parameter(torch.tensor(4.0))
+      self.task_gate_gammas[key] = nn.Parameter(torch.tensor(0.0))
 
     # Classifier katmanları
     for name, _ in self.classifier.named_parameters():
       key = 'classifier__' + name.replace('.', '__')
       self.gradient_transport_logits[key] = nn.Parameter(torch.tensor(4.0))
+      self.task_gate_gammas[key] = nn.Parameter(torch.tensor(0.0))
 
   def reset_classifier(self):
     self.classifier.reset_parameters()
@@ -89,13 +96,30 @@ class MAML(Module):
       for key, logit in self.gradient_transport_logits.items():
           out[key] = torch.sigmoid(logit).detach().item()
       return out
+
+  def get_task_gate_gammas(self):
+      out = {}
+      for key, gamma in self.task_gate_gammas.items():
+          out[key] = gamma.detach().item()
+      return out
+
   def _inner_forward(self, x, params, episode):
     """ Forward pass for the inner loop. """
     feat = self.encoder(x, get_child_dict(params, 'encoder'), episode)
     logits = self.classifier(feat, get_child_dict(params, 'classifier'))
     return logits
 
-  def _inner_iter(self, x, y, params, mom_buffer, episode, inner_args, detach,use_gradient_transport=False):
+  def _inner_iter(
+          self,
+          x,
+          y,
+          params,
+          mom_buffer,
+          episode,
+          inner_args,
+          detach,
+          use_gradient_transport=False,
+          task_gate_args=None):
     """ 
     Performs one inner-loop iteration of MAML including the forward and 
     backward passes and the parameter update.
@@ -113,6 +137,7 @@ class MAML(Module):
       updated_params (dict): the model parameters AFTER the update.
       mom_buffer (dict): the momentum buffer AFTER the update.
     """
+    task_gate_args = task_gate_args or {}
     with torch.enable_grad():
       # forward pass
       # AGAG Loss'ların bulunduğu yer.
@@ -128,6 +153,7 @@ class MAML(Module):
         if grad is None:
           updated_param = param
         else:
+          gate_signal_grad = grad
           if inner_args['weight_decay'] > 0:
             grad = grad + inner_args['weight_decay'] * param
           if inner_args['momentum'] > 0:
@@ -141,7 +167,13 @@ class MAML(Module):
             raise ValueError('invalid parameter name')
           if use_gradient_transport:
               gate_key = name.replace('.', '__')
-              gate = torch.sigmoid(self.gradient_transport_logits[gate_key])
+              gate_logit = self.gradient_transport_logits[gate_key]
+              if task_gate_args.get('enabled', False):
+                  gate_signal = self._compute_task_gate_signal(
+                      gate_signal_grad, gate_logit, task_gate_args)
+                  gate_logit = gate_logit + \
+                      self.task_gate_gammas[gate_key] * gate_signal
+              gate = torch.sigmoid(gate_logit)
               transported_grad = gate * grad
               updated_param = param - lr * transported_grad
           else:
@@ -152,7 +184,16 @@ class MAML(Module):
 
     return updated_params, mom_buffer
 
-  def _adapt(self, x, y, params, episode, inner_args, meta_train,use_gradient_transport=False):
+  def _adapt(
+          self,
+          x,
+          y,
+          params,
+          episode,
+          inner_args,
+          meta_train,
+          use_gradient_transport=False,
+          task_gate_args=None):
     """
     Performs inner-loop adaptation in MAML.
 
@@ -173,6 +214,8 @@ class MAML(Module):
 
     # Initializes a dictionary of momentum buffer for gradient descent in the 
     # inner loop. It has the same set of keys as the parameter dictionary.
+    task_gate_args = task_gate_args or {}
+
     mom_buffer = OrderedDict()
     if inner_args['momentum'] > 0:  #AGAG Klasik gradient descent yerine momentum gradient descent. Normal MAML'da yok, ufak bir ekleme. Çok önemli değil
       for name, param in params.items():
@@ -199,7 +242,9 @@ class MAML(Module):
       detach = not torch.is_grad_enabled()  # detach graph in the first pass
       self.is_first_pass(detach)
       params, mom_buffer = self._inner_iter(
-        x, y, params, mom_buffer, int(episode), inner_args, detach, use_gradient_transport=use_gradient_transport)
+        x, y, params, mom_buffer, int(episode), inner_args, detach,
+        use_gradient_transport=use_gradient_transport,
+        task_gate_args=task_gate_args)
       state = tuple(t if t.requires_grad else t.clone().requires_grad_(True)
         for t in tuple(params.values()) + tuple(mom_buffer.values()))
       return state
@@ -213,7 +258,9 @@ class MAML(Module):
           zip(mom_buffer_keys, state[-len(mom_buffer_keys):]))
       else:
         params, mom_buffer = self._inner_iter( #AGAG task için tek bir iterasyon
-          x, y, params, mom_buffer, episode, inner_args, not meta_train,use_gradient_transport=use_gradient_transport)
+          x, y, params, mom_buffer, episode, inner_args, not meta_train,
+          use_gradient_transport=use_gradient_transport,
+          task_gate_args=task_gate_args)
         
     return params
 
@@ -230,7 +277,8 @@ class MAML(Module):
           use_alignment_post_loss=False,  # post-alignment loss aktif mi?
           alignment_pre_weight=0.0,  # pre-alignment loss katsayısı (eta)
           alignment_post_weight=0.0,  # post-alignment loss katsayısı (eta)
-          use_gradient_transport=False
+          use_gradient_transport=False,
+          task_gate_args=None
   ):
     """
     Args:
@@ -248,6 +296,7 @@ class MAML(Module):
     assert self.classifier is not None
     assert x_shot.dim() == 5 and x_query.dim() == 5
     assert x_shot.size(0) == x_query.size(0)
+    task_gate_args = task_gate_args or {}
 
     # Alignment metrik/log hesaplaması yapılacak mı?
     # Bunun için hem return_metrics açık olmalı hem de query etiketleri gelmiş olmalı.
@@ -274,7 +323,8 @@ class MAML(Module):
     params = OrderedDict(self.named_parameters())
     for name in list(params.keys()):
       if not params[name].requires_grad or \
-        any(s in name for s in inner_args['frozen'] + ['temp', 'gradient_transport_logits']):
+        any(s in name for s in inner_args['frozen'] + [
+          'temp', 'gradient_transport_logits', 'task_gate_gammas']):
         params.pop(name)
 
     logits = []
@@ -338,7 +388,9 @@ class MAML(Module):
                   align_pre_loss = alignment_pre_weight * (1.0 - align_pre)
                   align_pre_loss_list.append(align_pre_loss)
       updated_params = self._adapt(  #AGAG Modelin inner loop'u -> θ′=θ−α∇θLsupport
-        x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train, use_gradient_transport=use_gradient_transport)
+        x_shot[ep], y_shot[ep], params, ep, inner_args, meta_train,
+        use_gradient_transport=use_gradient_transport,
+        task_gate_args=task_gate_args)
       # inner-loop validation
       # Query tarafında gradient gerekip gerekmediğini belirliyoruz.
       # - log alacaksak lazım
@@ -398,6 +450,22 @@ class MAML(Module):
     return logits
 
   #AGAG ALIGNMENT LOGLARI İÇİN EKLENEN FONKSİYONLAR
+  def _compute_task_gate_signal(self, grad, gate_logit, task_gate_args):
+      signal = task_gate_args.get('signal', 'grad_norm')
+      if signal != 'grad_norm':
+          raise ValueError('invalid task gate signal: {}'.format(signal))
+
+      grad_for_signal = grad
+      if task_gate_args.get('detach_signal', True):
+          grad_for_signal = grad.detach()
+
+      norm = torch.norm(grad_for_signal)
+      if task_gate_args.get('normalize_by_numel', True):
+          norm = norm / (grad_for_signal.numel() ** 0.5)
+
+      value = torch.log1p(norm)
+      return value.to(device=gate_logit.device, dtype=gate_logit.dtype)
+
   def _get_grads_from_loss(
           self,
           loss,

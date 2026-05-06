@@ -20,5 +20,9 @@ inner_args:
   frozen:
     - bn
 
-use_gradient_transport: false
+use_gradient_transport: true
+gradient_transport_mode: task_conditioned_gate_norm
+task_gate_signal: grad_norm
+task_gate_detach_signal: true
+task_gate_normalize_by_numel: true
 epoch: 10

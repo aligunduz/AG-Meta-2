@@ -129,3 +129,37 @@ def config_inner_args(inner_args):
   inner_args['frozen'] = inner_args.get('frozen') or []
 
   return inner_args
+
+
+def config_task_gate_args(config):
+  task_gate_args = dict(config.get('task_gate_args') or {})
+
+  mode = config.get('gradient_transport_mode')
+  if mode is not None:
+    if mode == 'scalar':
+      task_gate_args['enabled'] = False
+    elif mode == 'task_conditioned_gate_norm':
+      task_gate_args['enabled'] = True
+      task_gate_args['signal'] = 'grad_norm'
+    else:
+      raise ValueError('invalid gradient_transport_mode: {}'.format(mode))
+
+  if 'use_task_conditioned_gate' in config:
+    task_gate_args['enabled'] = config['use_task_conditioned_gate']
+  task_gate_args['enabled'] = task_gate_args.get('enabled', False)
+
+  if 'task_gate_signal' in config:
+    task_gate_args['signal'] = config['task_gate_signal']
+  task_gate_args['signal'] = task_gate_args.get('signal', 'grad_norm')
+
+  if 'task_gate_detach_signal' in config:
+    task_gate_args['detach_signal'] = config['task_gate_detach_signal']
+  task_gate_args['detach_signal'] = task_gate_args.get('detach_signal', True)
+
+  if 'task_gate_normalize_by_numel' in config:
+    task_gate_args['normalize_by_numel'] = \
+      config['task_gate_normalize_by_numel']
+  task_gate_args['normalize_by_numel'] = task_gate_args.get(
+    'normalize_by_numel', True)
+
+  return task_gate_args

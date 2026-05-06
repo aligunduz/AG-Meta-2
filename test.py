@@ -38,6 +38,9 @@ def main(config):
   use_gradient_transport = config.get(
     'use_gradient_transport',
     ckpt_config.get('use_gradient_transport', False))
+  task_gate_config = dict(ckpt_config)
+  task_gate_config.update(config)
+  task_gate_args = utils.config_task_gate_args(task_gate_config)
   model = models.load(ckpt, load_clf=(not inner_args['reset_classifier']))
 
   if args.efficient:
@@ -49,6 +52,8 @@ def main(config):
   utils.log('num params: {}'.format(utils.compute_n_params(model)))
   utils.log('gradient transport: {}'.format(
     'enabled' if use_gradient_transport else 'disabled'))
+  utils.log('task-conditioned gate: {}'.format(
+    task_gate_args if task_gate_args.get('enabled', False) else 'disabled'))
   if use_gradient_transport:
     if 'gradient_transport_state_dict' not in ckpt:
       utils.log('warning: checkpoint has no gradient transport gates; using initialized gate values')
@@ -57,6 +62,11 @@ def main(config):
     if len(gates) > 0:
       gate_mean = sum(gates.values()) / len(gates)
       utils.log('gradient transport gate_mean: {:.4f}'.format(gate_mean))
+    if task_gate_args.get('enabled', False):
+      gammas = model_for_log.get_task_gate_gammas()
+      if len(gammas) > 0:
+        gamma_abs_mean = sum(abs(v) for v in gammas.values()) / len(gammas)
+        utils.log('task gate gamma_abs_mean: {:.4f}'.format(gamma_abs_mean))
 
   ##### Evaluation #####
 
@@ -86,7 +96,8 @@ def main(config):
             y_shot,
             inner_args,
             meta_train=False,
-            use_gradient_transport=use_gradient_transport)
+            use_gradient_transport=use_gradient_transport,
+            task_gate_args=task_gate_args)
           logits = logits.view(-1, config['test']['n_way'])
           labels = y_query.view(-1)
 
