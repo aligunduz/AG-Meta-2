@@ -162,6 +162,10 @@ def config_task_gate_args(config):
   task_gate_args['normalize_by_numel'] = task_gate_args.get(
     'normalize_by_numel', True)
 
+  if 'task_gate_signal_scale' in config:
+    task_gate_args['signal_scale'] = config['task_gate_signal_scale']
+  task_gate_args['signal_scale'] = task_gate_args.get('signal_scale', 1.0)
+
   if 'task_gate_gamma_scale' in config:
     task_gate_args['gamma_scale'] = config['task_gate_gamma_scale']
   task_gate_args['gamma_scale'] = task_gate_args.get('gamma_scale', 1.0)

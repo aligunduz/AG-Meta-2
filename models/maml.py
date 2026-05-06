@@ -221,8 +221,10 @@ class MAML(Module):
                   gate_signal = self._compute_task_gate_signal(
                       gate_signal_grad, gate_logit, task_gate_args)
                   gamma_scale = task_gate_args.get('gamma_scale', 1.0)
+                  signal_scale = task_gate_args.get('signal_scale', 1.0)
                   gate_logit = gate_logit + \
-                      gamma_scale * self.task_gate_gammas[gate_key] * gate_signal
+                      gamma_scale * self.task_gate_gammas[gate_key] * \
+                      signal_scale * gate_signal
               gate = torch.sigmoid(gate_logit)
               if task_gate_args.get('enabled', False) and not detach:
                   self._record_task_gate_stats(gate, gate_signal)
