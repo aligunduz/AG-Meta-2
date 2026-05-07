@@ -49,7 +49,8 @@ task_gate_signal: grad_norm
 task_gate_detach_signal: true
 task_gate_normalize_by_numel: true
 task_gate_signal_scale: 10.0
-task_gate_gamma_scale: 0.2
-task_gate_gamma_l2_weight: 0.0001
+task_gate_gamma_scale: 0.05
+task_gate_gamma_l2_weight: 0.005
+task_gate_min: 0.5
 task_gate_collect_stats: true
 epoch: 200

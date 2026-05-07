@@ -226,6 +226,9 @@ class MAML(Module):
                       gamma_scale * self.task_gate_gammas[gate_key] * \
                       signal_scale * gate_signal
               gate = torch.sigmoid(gate_logit)
+              gate_min = task_gate_args.get('gate_min', None)
+              if gate_min is not None:
+                  gate = gate.clamp_min(float(gate_min))
               if task_gate_args.get('enabled', False) and not detach:
                   self._record_task_gate_stats(gate, gate_signal)
               transported_grad = gate * grad

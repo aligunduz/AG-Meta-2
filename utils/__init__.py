@@ -176,6 +176,10 @@ def config_task_gate_args(config):
   task_gate_args['gamma_l2_weight'] = task_gate_args.get(
     'gamma_l2_weight', 0.0)
 
+  if 'task_gate_min' in config:
+    task_gate_args['gate_min'] = config['task_gate_min']
+  task_gate_args['gate_min'] = task_gate_args.get('gate_min', None)
+
   if 'task_gate_collect_stats' in config:
     task_gate_args['collect_stats'] = config['task_gate_collect_stats']
   task_gate_args['collect_stats'] = task_gate_args.get('collect_stats', True)
