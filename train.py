@@ -20,6 +20,20 @@ import utils
 import utils.optimizers as optimizers
 
 
+class NullSummaryWriter(object):
+  def add_scalar(self, *args, **kwargs):
+    pass
+
+  def add_scalars(self, *args, **kwargs):
+    pass
+
+  def flush(self):
+    pass
+
+  def close(self):
+    pass
+
+
 def main(config):
   random.seed(0)
   np.random.seed(0)
@@ -40,7 +54,11 @@ def main(config):
   ckpt_path = os.path.join('./save', ckpt_name)
   utils.ensure_path(ckpt_path)
   utils.set_log_path(ckpt_path)
-  writer = SummaryWriter(os.path.join(ckpt_path, 'tensorboard'))
+  if config.get('use_tensorboard', True):
+    writer = SummaryWriter(os.path.join(ckpt_path, 'tensorboard'))
+  else:
+    writer = NullSummaryWriter()
+    utils.log('tensorboard: disabled')
   yaml.dump(config, open(os.path.join(ckpt_path, 'config.yaml'), 'w'))
   # Alignment log açık mı?
   log_alignment = config.get('log_alignment', False)
