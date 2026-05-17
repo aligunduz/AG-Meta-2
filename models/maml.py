@@ -152,10 +152,12 @@ class MAML(Module):
           stats['effective_gate_min'] = min(stats['effective_gate_min'], gate_value)
           stats['effective_gate_max'] = max(stats['effective_gate_max'], gate_value)
 
-  def _inner_forward(self, x, params, episode):
+  def _inner_forward(self, x, params, episode, return_feat=False):
     """ Forward pass for the inner loop. """
     feat = self.encoder(x, get_child_dict(params, 'encoder'), episode)
     logits = self.classifier(feat, get_child_dict(params, 'classifier'))
+    if return_feat:
+      return logits, feat
     return logits
 
   def _inner_iter(
@@ -190,7 +192,15 @@ class MAML(Module):
     with torch.enable_grad():
       # forward pass
       # AGAG Loss'ların bulunduğu yer.
-      logits = self._inner_forward(x, params, episode)
+      use_proto_signal = self._uses_prototype_task_signal(task_gate_args)
+      if use_proto_signal:
+        logits, support_feat = self._inner_forward(
+          x, params, episode, return_feat=True)
+        proto_gate_signal = self._compute_prototype_gate_signal(
+          support_feat, y, task_gate_args)
+      else:
+        logits = self._inner_forward(x, params, episode)
+        proto_gate_signal = None
       loss = F.cross_entropy(logits, y)
       # backward pass
       grads = autograd.grad(loss, params.values(), 
@@ -219,11 +229,16 @@ class MAML(Module):
               gate_logit = self.gradient_transport_logits[gate_key]
               if task_gate_args.get('enabled', False):
                   gate_signal = self._compute_task_gate_signal(
-                      gate_signal_grad, gate_logit, task_gate_args)
+                      gate_signal_grad,
+                      gate_logit,
+                      task_gate_args,
+                      proto_gate_signal)
+                  residual_scale = task_gate_args.get('residual_scale', 1.0)
                   gamma_scale = task_gate_args.get('gamma_scale', 1.0)
                   signal_scale = task_gate_args.get('signal_scale', 1.0)
                   gate_logit = gate_logit + \
-                      gamma_scale * self.task_gate_gammas[gate_key] * \
+                      residual_scale * gamma_scale * \
+                      self.task_gate_gammas[gate_key] * \
                       signal_scale * gate_signal
               gate = torch.sigmoid(gate_logit)
               gate_min = task_gate_args.get('gate_min', None) \
@@ -513,8 +528,78 @@ class MAML(Module):
     return logits
 
   #AGAG ALIGNMENT LOGLARI İÇİN EKLENEN FONKSİYONLAR
-  def _compute_task_gate_signal(self, grad, gate_logit, task_gate_args):
+  def _uses_prototype_task_signal(self, task_gate_args):
+      return (
+          task_gate_args.get('enabled', False) and
+          task_gate_args.get('signal') == 'proto_separability')
+
+  def _compute_prototype_gate_signal(self, feat, y, task_gate_args):
+      feat_for_signal = feat
+      if task_gate_args.get('detach_signal', True):
+          feat_for_signal = feat_for_signal.detach()
+      feat_for_signal = feat_for_signal.float()
+
+      if feat_for_signal.dim() > 2:
+          feat_for_signal = feat_for_signal.flatten(1)
+
+      if task_gate_args.get('proto_normalize_features', True):
+          feat_for_signal = F.normalize(feat_for_signal, p=2, dim=1)
+
+      classes = torch.unique(y)
+      prototypes = []
+      intra_distances = []
+      for cls in classes:
+          cls_feat = feat_for_signal[y == cls]
+          proto = cls_feat.mean(dim=0)
+          prototypes.append(proto)
+          if cls_feat.size(0) > 1:
+              cls_dist = (cls_feat - proto).pow(2).sum(dim=1).sqrt()
+              intra_distances.append(cls_dist.mean())
+          else:
+              intra_distances.append(cls_feat.new_tensor(0.0))
+
+      prototypes = torch.stack(prototypes)
+      if prototypes.size(0) > 1:
+          d_inter = torch.pdist(prototypes, p=2).mean()
+      else:
+          d_inter = prototypes.new_tensor(0.0)
+      d_intra = torch.stack(intra_distances).mean()
+
+      eps = float(task_gate_args.get('proto_eps', 1e-6))
+      temp = float(task_gate_args.get('proto_temperature', 1.0))
+      metric = task_gate_args.get('proto_metric', 'log_ratio')
+      eps_t = feat_for_signal.new_tensor(eps)
+
+      if metric == 'log_ratio':
+          intra_floor = float(task_gate_args.get('proto_intra_floor', 0.5))
+          denom = d_intra + feat_for_signal.new_tensor(intra_floor)
+          raw_signal = torch.log((d_inter + eps_t) / (denom + eps_t))
+      elif metric == 'margin':
+          raw_signal = d_inter - d_intra
+      elif metric == 'ratio':
+          intra_floor = float(task_gate_args.get('proto_intra_floor', 0.5))
+          raw_signal = d_inter / (
+              d_intra + feat_for_signal.new_tensor(intra_floor) + eps_t)
+      else:
+          raise ValueError('invalid prototype gate metric: {}'.format(metric))
+
+      return torch.tanh(raw_signal / max(temp, eps))
+
+  def _compute_task_gate_signal(
+          self,
+          grad,
+          gate_logit,
+          task_gate_args,
+          proto_gate_signal=None):
       signal = task_gate_args.get('signal', 'grad_norm')
+      if signal == 'proto_separability':
+          if proto_gate_signal is None:
+              raise ValueError('prototype gate signal was not computed')
+          value = proto_gate_signal
+          if task_gate_args.get('detach_signal', True):
+              value = value.detach()
+          return value.to(device=gate_logit.device, dtype=gate_logit.dtype)
+
       if signal != 'grad_norm':
           raise ValueError('invalid task gate signal: {}'.format(signal))
 
