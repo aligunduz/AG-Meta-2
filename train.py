@@ -34,6 +34,108 @@ class NullSummaryWriter(object):
     pass
 
 
+class WandbLogger(object):
+  def __init__(self, config, args, run_name, run_dir):
+    self.enabled = False
+    self.run = None
+    self._wandb = None
+    self.log_artifacts_enabled = False
+    self.artifact_name = self._artifact_safe_name(run_name)
+
+    wandb_config = dict(config.get('wandb') or {})
+    enabled = bool(wandb_config.get('enabled', False) or args.wandb)
+    self.log_artifacts_enabled = bool(
+      wandb_config.get('log_artifacts', False) or args.wandb_log_artifacts)
+
+    if not enabled:
+      return
+
+    try:
+      import wandb
+    except ImportError as exc:
+      raise RuntimeError(
+        'W&B logging was requested, but wandb is not installed. '
+        'Install it with: pip install wandb') from exc
+
+    self._wandb = wandb
+    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-2'
+    entity = args.wandb_entity or wandb_config.get('entity')
+    mode = args.wandb_mode or wandb_config.get('mode') or 'online'
+    notes = args.wandb_notes or wandb_config.get('notes')
+    save_code = bool(wandb_config.get('save_code', False))
+
+    tags = wandb_config.get('tags') or []
+    if isinstance(tags, str):
+      tags = [tags]
+    else:
+      tags = list(tags)
+    if args.tag:
+      tags.append(args.tag)
+    if args.wandb_tags:
+      tags.extend([tag.strip() for tag in args.wandb_tags.split(',')
+                   if tag.strip()])
+
+    wandb_run_name = args.wandb_run_name or wandb_config.get('name') or run_name
+    self.run = wandb.init(
+      project=project,
+      entity=entity,
+      name=wandb_run_name,
+      config=config,
+      dir=run_dir,
+      mode=mode,
+      tags=tags,
+      notes=notes,
+      save_code=save_code)
+    self.enabled = True
+    if self.run is not None:
+      self.run.summary['checkpoint_dir'] = run_dir
+      self.run.summary['run_name'] = wandb_run_name
+    utils.log('wandb: enabled project={} name={} mode={}'.format(
+      project, wandb_run_name, mode))
+
+  def watch(self, model, config):
+    if not self.enabled:
+      return
+    wandb_config = dict(config.get('wandb') or {})
+    if not wandb_config.get('watch_model', False):
+      return
+    log = wandb_config.get('watch_log', 'gradients')
+    log_freq = int(wandb_config.get('watch_log_freq', 100))
+    self._wandb.watch(model, log=log, log_freq=log_freq)
+
+  def log(self, metrics, step=None):
+    if self.enabled:
+      self._wandb.log(metrics, step=step)
+
+  def set_summary(self, key, value):
+    if self.enabled and self.run is not None:
+      self.run.summary[key] = value
+
+  def log_model_artifacts(self, ckpt_path):
+    if not self.enabled or not self.log_artifacts_enabled:
+      return
+    artifact = self._wandb.Artifact(self.artifact_name, type='model')
+    added = False
+    for filename in ['epoch-last.pth', 'max-va.pth', 'config.yaml', 'trlog.pth']:
+      path = os.path.join(ckpt_path, filename)
+      if os.path.exists(path):
+        artifact.add_file(path, name=filename)
+        added = True
+    if added:
+      self._wandb.log_artifact(artifact, aliases=['final'])
+
+  def finish(self):
+    if self.enabled:
+      self._wandb.finish()
+
+  @staticmethod
+  def _artifact_safe_name(name):
+    safe = ''.join(
+      ch if ch.isalnum() or ch in ['-', '_', '.'] else '-'
+      for ch in name)
+    return safe.strip('.-') or 'model'
+
+
 def main(config):
   random.seed(0)
   np.random.seed(0)
@@ -60,6 +162,7 @@ def main(config):
     writer = NullSummaryWriter()
     utils.log('tensorboard: disabled')
   yaml.dump(config, open(os.path.join(ckpt_path, 'config.yaml'), 'w'))
+  wandb_logger = WandbLogger(config, args, ckpt_name, ckpt_path)
   # Alignment log açık mı?
   log_alignment = config.get('log_alignment', False)
 
@@ -143,6 +246,7 @@ def main(config):
     'enabled' if use_gradient_transport else 'disabled'))
   utils.log('task-conditioned gate: {}'.format(
     task_gate_args if task_gate_args.get('enabled', False) else 'disabled'))
+  wandb_logger.watch(model, config)
   timer_elapsed, timer_epoch = utils.Timer(), utils.Timer()
 
   scaler = amp.GradScaler('cuda')  # NEW (AMP scaler)
@@ -327,15 +431,23 @@ def main(config):
 
     gate_mean = None
     gamma_abs_mean = None
+    wandb_metrics = {
+        'epoch': epoch,
+        'optimizer/lr': optimizer.param_groups[0]['lr'],
+        'train/loss': aves['tl'],
+        'train/accuracy': aves['ta'],
+    }
     if use_gradient_transport:
         model_for_log = model.module if config.get('_parallel') else model
         gates = model_for_log.get_gradient_transport_gates()
         gate_mean = sum(gates.values()) / len(gates)
 
         writer.add_scalar('gradient_transport/gate_mean', gate_mean, epoch)
+        wandb_metrics['gradient_transport/gate_mean'] = gate_mean
 
         for gate_name, gate_value in gates.items():
             writer.add_scalar(f'gradient_transport/{gate_name}', gate_value, epoch)
+            wandb_metrics[f'gradient_transport/{gate_name}'] = gate_value
 
         if task_gate_args.get('enabled', False):
             gammas = model_for_log.get_task_gate_gammas()
@@ -348,16 +460,31 @@ def main(config):
             writer.add_scalar('task_gate/effective_gate_min', aves['eff_gate_min'], epoch)
             writer.add_scalar('task_gate/effective_gate_max', aves['eff_gate_max'], epoch)
             writer.add_scalar('task_gate/task_signal_mean', aves['task_signal'], epoch)
+            wandb_metrics['task_gate/gamma_mean'] = gamma_mean
+            wandb_metrics['task_gate/gamma_abs_mean'] = gamma_abs_mean
+            wandb_metrics['task_gate/effective_gate_mean'] = aves['eff_gate']
+            wandb_metrics['task_gate/effective_gate_min'] = aves['eff_gate_min']
+            wandb_metrics['task_gate/effective_gate_max'] = aves['eff_gate_max']
+            wandb_metrics['task_gate/task_signal_mean'] = aves['task_signal']
             if 'gamma_l2' in aves:
                 writer.add_scalar('task_gate/gamma_l2_loss', aves['gamma_l2'], epoch)
+                wandb_metrics['task_gate/gamma_l2_loss'] = aves['gamma_l2']
 
             for gamma_name, gamma_value in gammas.items():
                 writer.add_scalar(f'task_gate/{gamma_name}', gamma_value, epoch)
+                wandb_metrics[f'task_gate/{gamma_name}'] = gamma_value
 
-    t_epoch = utils.time_str(timer_epoch.end())
-    t_elapsed = utils.time_str(timer_elapsed.end())
-    t_estimate = utils.time_str(timer_elapsed.end() / 
-      (epoch - start_epoch + 1) * (config['epoch'] - start_epoch + 1))
+    epoch_seconds = timer_epoch.end()
+    elapsed_seconds = timer_elapsed.end()
+    estimate_seconds = (
+      elapsed_seconds / (epoch - start_epoch + 1)
+      * (config['epoch'] - start_epoch + 1))
+    t_epoch = utils.time_str(epoch_seconds)
+    t_elapsed = utils.time_str(elapsed_seconds)
+    t_estimate = utils.time_str(estimate_seconds)
+    wandb_metrics['time/epoch_sec'] = epoch_seconds
+    wandb_metrics['time/elapsed_sec'] = elapsed_seconds
+    wandb_metrics['time/estimated_total_sec'] = estimate_seconds
 
     # formats output
     log_str = 'epoch {}, meta-train {:.4f}|{:.4f}'.format(
@@ -379,6 +506,8 @@ def main(config):
     if log_alignment:
         writer.add_scalar('alignment/align_pre', aves['align_pre'], epoch)
         writer.add_scalar('alignment/align_post', aves['align_post'], epoch)
+        wandb_metrics['alignment/align_pre'] = aves['align_pre']
+        wandb_metrics['alignment/align_post'] = aves['align_post']
     if eval_val:
       if log_alignment:
           log_str += ', meta-val {:.4f}|{:.4f}, align {:.4f}|{:.4f}'.format(aves['vl'], aves['va'], aves['align_pre'], aves['align_post'])
@@ -386,6 +515,10 @@ def main(config):
           log_str += ', meta-val {:.4f}|{:.4f}'.format(aves['vl'], aves['va'])
       writer.add_scalars('loss', {'meta-val': aves['vl']}, epoch)
       writer.add_scalars('acc', {'meta-val': aves['va']}, epoch)
+      wandb_metrics['val/loss'] = aves['vl']
+      wandb_metrics['val/accuracy'] = aves['va']
+      wandb_metrics['val/best_accuracy'] = max(max_va, aves['va'])
+    wandb_logger.log(wandb_metrics, step=epoch)
 
     log_str += ', {} {}/{}'.format(t_epoch, t_elapsed, t_estimate)
     utils.log(log_str)
@@ -430,8 +563,14 @@ def main(config):
     if aves['va'] > max_va:
       max_va = aves['va']
       torch.save(ckpt, os.path.join(ckpt_path, 'max-va.pth'))
+    wandb_logger.set_summary('best/val_accuracy', max_va)
+    wandb_logger.set_summary('last/epoch', epoch)
 
     writer.flush()
+
+  wandb_logger.log_model_artifacts(ckpt_path)
+  wandb_logger.finish()
+  writer.close()
 
 
 if __name__ == '__main__':
@@ -449,6 +588,31 @@ if __name__ == '__main__':
                       type=str, default='0')
   parser.add_argument('--efficient', 
                       help='if True, enables gradient checkpointing',
+                      action='store_true')
+  parser.add_argument('--wandb',
+                      help='enable Weights & Biases logging',
+                      action='store_true')
+  parser.add_argument('--wandb-project',
+                      help='W&B project name',
+                      type=str, default=None)
+  parser.add_argument('--wandb-entity',
+                      help='W&B team or user entity',
+                      type=str, default=None)
+  parser.add_argument('--wandb-mode',
+                      help='W&B mode: online, offline, or disabled',
+                      type=str, default=None,
+                      choices=['online', 'offline', 'disabled'])
+  parser.add_argument('--wandb-run-name',
+                      help='W&B run name',
+                      type=str, default=None)
+  parser.add_argument('--wandb-tags',
+                      help='comma-separated W&B tags',
+                      type=str, default=None)
+  parser.add_argument('--wandb-notes',
+                      help='W&B run notes',
+                      type=str, default=None)
+  parser.add_argument('--wandb-log-artifacts',
+                      help='upload final checkpoints to W&B Artifacts',
                       action='store_true')
   args = parser.parse_args()
   config = yaml.load(open(args.config, 'r'), Loader=yaml.FullLoader)

@@ -74,6 +74,11 @@ are not already available in the notebook environment:
 pip install pyyaml tensorboardX torchviz tqdm scipy pillow
 ```
 
+For Weights & Biases experiment tracking, install the optional package too:
+```
+pip install wandb
+```
+
 **Datasets**
 
 Please follow the download links [here](https://github.com/cyvius96/few-shot-meta-baseline). Please modify the file names accordingly so that they can be recognized by the data loaders.
@@ -134,6 +139,54 @@ python train.py --config=configs/convnet4/mini-imagenet/5_way_5_shot/train_repro
 ```
 
 Use `-tag` to customize the name of the directory where the checkpoints and log files are saved.
+
+### 1.1. Tracking Experiments with W&B
+
+The training script can log each epoch to Weights & Biases without changing the
+YAML config. In Colab, log in once:
+```
+import wandb
+wandb.login()
+```
+
+Then start training with `--wandb`:
+```
+python train.py \
+  --config=configs/convnet4/mini-imagenet/5_way_1_shot/train_reproduce.yaml \
+  --wandb \
+  --wandb-project ag-meta-2 \
+  --wandb-tags convnet4,mini-imagenet,5way1shot
+```
+
+By default, W&B logs scalar metrics such as train/validation loss, accuracy,
+learning rate, elapsed time, gradient transport gates, task-gate stats, and
+alignment metrics when those features are enabled.
+
+Checkpoint upload is disabled by default to avoid using W&B storage quickly.
+If you want to upload the final `epoch-last.pth`, `max-va.pth`, `config.yaml`,
+and `trlog.pth` as a W&B Artifact, add:
+```
+--wandb-log-artifacts
+```
+
+You can also enable W&B from a config file:
+```
+wandb:
+  enabled: true
+  project: ag-meta-2
+  mode: online
+  tags:
+    - convnet4
+    - mini-imagenet
+    - 5way1shot
+  log_artifacts: false
+```
+
+For no-internet runs, use offline mode and sync later:
+```
+python train.py --config=... --wandb --wandb-mode offline
+wandb sync save/<run-name>/wandb/<offline-run-dir>
+```
 
 ### 2. Testing MAML
 Here is how one would test MAML for 5-way-1-shot classification on mini-ImageNet to reproduce the result in the original paper. Please confirm the loading path first.
