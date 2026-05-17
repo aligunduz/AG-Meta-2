@@ -226,7 +226,8 @@ class MAML(Module):
                       gamma_scale * self.task_gate_gammas[gate_key] * \
                       signal_scale * gate_signal
               gate = torch.sigmoid(gate_logit)
-              gate_min = task_gate_args.get('gate_min', None)
+              gate_min = task_gate_args.get('gate_min', None) \
+                  if task_gate_args.get('enabled', False) else None
               if gate_min is not None:
                   gate = gate.clamp_min(float(gate_min))
               if task_gate_args.get('enabled', False) and not detach:
@@ -354,7 +355,7 @@ class MAML(Module):
     assert x_shot.dim() == 5 and x_query.dim() == 5
     assert x_shot.size(0) == x_query.size(0)
     task_gate_args = task_gate_args or {}
-    if task_gate_args.get('enabled', False) and \
+    if use_gradient_transport and task_gate_args.get('enabled', False) and \
       task_gate_args.get('collect_stats', True):
       self.reset_task_gate_stats()
     else:

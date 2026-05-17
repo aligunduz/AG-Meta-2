@@ -187,8 +187,6 @@ def main(config):
 
   use_gradient_transport = config.get('use_gradient_transport', False)
   task_gate_args = utils.config_task_gate_args(config)
-  if task_gate_args.get('enabled', False) and not use_gradient_transport:
-    utils.log('warning: task-conditioned gate is enabled but gradient transport is disabled')
   ##### Dataset #####
 
   # meta-train

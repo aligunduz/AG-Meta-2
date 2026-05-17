@@ -134,19 +134,12 @@ def config_inner_args(inner_args):
 def config_task_gate_args(config):
   task_gate_args = dict(config.get('task_gate_args') or {})
 
-  mode = config.get('gradient_transport_mode')
-  if mode is not None:
-    if mode == 'scalar':
-      task_gate_args['enabled'] = False
-    elif mode == 'task_conditioned_gate_norm':
-      task_gate_args['enabled'] = True
-      task_gate_args['signal'] = 'grad_norm'
-    else:
-      raise ValueError('invalid gradient_transport_mode: {}'.format(mode))
-
-  if 'use_task_conditioned_gate' in config:
-    task_gate_args['enabled'] = config['use_task_conditioned_gate']
-  task_gate_args['enabled'] = task_gate_args.get('enabled', False)
+  use_gradient_transport = config.get('use_gradient_transport', False)
+  mode = config.get('gradient_transport_mode', 'scalar')
+  task_gate_enabled = (
+    use_gradient_transport and mode == 'task_conditioned_gate_norm')
+  if mode == 'task_conditioned_gate_norm':
+    task_gate_args['signal'] = 'grad_norm'
 
   if 'task_gate_signal' in config:
     task_gate_args['signal'] = config['task_gate_signal']
@@ -183,5 +176,6 @@ def config_task_gate_args(config):
   if 'task_gate_collect_stats' in config:
     task_gate_args['collect_stats'] = config['task_gate_collect_stats']
   task_gate_args['collect_stats'] = task_gate_args.get('collect_stats', True)
+  task_gate_args['enabled'] = task_gate_enabled
 
   return task_gate_args
