@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 
 import yaml
@@ -13,6 +14,86 @@ import datasets
 import models
 import utils
 import utils.optimizers as optimizers
+
+
+class WandbLogger(object):
+  def __init__(self, config, args, run_name, run_dir):
+    self.enabled = False
+    self.run = None
+    self._wandb = None
+
+    wandb_config = dict(config.get('wandb') or {})
+    enabled = bool(wandb_config.get('enabled', False) or args.wandb)
+    if not enabled:
+      return
+
+    try:
+      import wandb
+    except ImportError as exc:
+      raise RuntimeError(
+        'W&B logging was requested, but wandb is not installed. '
+        'Install it with: pip install wandb') from exc
+
+    self._wandb = wandb
+    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-2'
+    entity = args.wandb_entity or wandb_config.get('entity')
+    mode = args.wandb_mode or wandb_config.get('mode') or 'online'
+    notes = args.wandb_notes or wandb_config.get('notes')
+    save_code = bool(wandb_config.get('save_code', False))
+
+    tags = wandb_config.get('tags') or []
+    if isinstance(tags, str):
+      tags = [tags]
+    else:
+      tags = list(tags)
+    tags.append('test')
+    if args.wandb_tags:
+      tags.extend([tag.strip() for tag in args.wandb_tags.split(',')
+                   if tag.strip()])
+
+    wandb_run_name = args.wandb_run_name or wandb_config.get('name') or run_name
+    self.run = wandb.init(
+      project=project,
+      entity=entity,
+      name=wandb_run_name,
+      config=config,
+      dir=run_dir,
+      mode=mode,
+      tags=tags,
+      notes=notes,
+      save_code=save_code)
+    self.enabled = True
+    if self.run is not None:
+      self.run.summary['run_name'] = wandb_run_name
+      self.run.summary['checkpoint_path'] = config.get('load')
+    utils.log('wandb: enabled project={} name={} mode={}'.format(
+      project, wandb_run_name, mode))
+
+  def log(self, metrics, step=None):
+    if self.enabled:
+      self._wandb.log(metrics, step=step)
+
+  def set_summary(self, key, value):
+    if self.enabled and self.run is not None:
+      self.run.summary[key] = value
+
+  def finish(self):
+    if self.enabled:
+      self._wandb.finish()
+
+
+def make_test_run_name(config, ckpt_config):
+  dataset = config.get('dataset', ckpt_config.get('dataset', 'dataset'))
+  test_cfg = config.get('test') or {}
+  n_way = test_cfg.get('n_way', 'way')
+  n_shot = test_cfg.get('n_shot', 'shot')
+  mode = config.get(
+    'gradient_transport_mode',
+    ckpt_config.get('gradient_transport_mode', 'scalar'))
+  ckpt_name = os.path.splitext(os.path.basename(config.get('load', 'ckpt')))[0]
+  return '{}_{}_way_{}_shot_{}_{}_test'.format(
+    dataset.replace('meta-', ''), n_way, n_shot, mode, ckpt_name)
+
 
 def main(config):
   random.seed(0)
@@ -35,6 +116,9 @@ def main(config):
   ckpt = torch.load(config['load'])
   inner_args = utils.config_inner_args(config.get('inner_args'))
   ckpt_config = ckpt.get('config', {})
+  run_dir = os.path.dirname(config.get('load') or '.') or '.'
+  wandb_logger = WandbLogger(
+    config, args, make_test_run_name(config, ckpt_config), run_dir)
   use_gradient_transport = config.get(
     'use_gradient_transport',
     ckpt_config.get('use_gradient_transport', False))
@@ -42,6 +126,7 @@ def main(config):
   task_gate_config.update(config)
   task_gate_args = utils.config_task_gate_args(task_gate_config)
   model = models.load(ckpt, load_clf=(not inner_args['reset_classifier']))
+  ckpt_training = ckpt.get('training', {})
 
   if args.efficient:
     model.go_efficient()
@@ -54,6 +139,19 @@ def main(config):
     'enabled' if use_gradient_transport else 'disabled'))
   utils.log('task-conditioned gate: {}'.format(
     task_gate_args if task_gate_args.get('enabled', False) else 'disabled'))
+  if 'epoch' in ckpt_training:
+    wandb_logger.set_summary('checkpoint/epoch', ckpt_training['epoch'])
+  if 'max_va' in ckpt_training:
+    wandb_logger.set_summary('checkpoint/max_val_accuracy',
+                             ckpt_training['max_va'])
+  wandb_logger.set_summary('gradient_transport/enabled',
+                           int(bool(use_gradient_transport)))
+  wandb_logger.set_summary('gradient_transport/mode', task_gate_args.get(
+    'mode', config.get('gradient_transport_mode', 'scalar')))
+  wandb_logger.set_summary(
+    'task_gate/signal',
+    task_gate_args.get('signal') if task_gate_args.get('enabled', False)
+    else 'disabled')
   if use_gradient_transport:
     if 'gradient_transport_state_dict' not in ckpt:
       utils.log('warning: checkpoint has no gradient transport gates; using initialized gate values')
@@ -117,6 +215,29 @@ def main(config):
     print('test epoch {}: acc={:.2f} +- {:.2f} (%)'.format(
       epoch, aves_va.item() * 100, 
       utils.mean_confidence_interval(va_lst) * 100))
+    ci95 = utils.mean_confidence_interval(va_lst)
+    wandb_logger.log({
+      'test/epoch': epoch,
+      'test/accuracy': aves_va.item(),
+      'test/accuracy_percent': aves_va.item() * 100,
+      'test/confidence_interval_95': ci95,
+      'test/confidence_interval_95_percent': ci95 * 100,
+      'test/n_way': config['test']['n_way'],
+      'test/n_shot': config['test']['n_shot'],
+      'test/n_query': config['test']['n_query'],
+      'test/n_episode': config['test']['n_episode'],
+      'test/n_batch': config['test'].get('n_batch'),
+      'gradient_transport/enabled': int(bool(use_gradient_transport)),
+      'task_gate/enabled': int(bool(task_gate_args.get('enabled', False))),
+    }, step=epoch)
+
+  final_ci95 = utils.mean_confidence_interval(va_lst)
+  wandb_logger.set_summary('test/accuracy', aves_va.item())
+  wandb_logger.set_summary('test/accuracy_percent', aves_va.item() * 100)
+  wandb_logger.set_summary('test/confidence_interval_95', final_ci95)
+  wandb_logger.set_summary(
+    'test/confidence_interval_95_percent', final_ci95 * 100)
+  wandb_logger.finish()
 
 
 if __name__ == '__main__':
@@ -129,6 +250,28 @@ if __name__ == '__main__':
   parser.add_argument('--efficient', 
                       help='if True, enables gradient checkpointing',
                       action='store_true')
+  parser.add_argument('--wandb',
+                      help='enable Weights & Biases logging',
+                      action='store_true')
+  parser.add_argument('--wandb-project',
+                      help='W&B project name',
+                      type=str, default=None)
+  parser.add_argument('--wandb-entity',
+                      help='W&B team or user entity',
+                      type=str, default=None)
+  parser.add_argument('--wandb-mode',
+                      help='W&B mode: online, offline, or disabled',
+                      type=str, default=None,
+                      choices=['online', 'offline', 'disabled'])
+  parser.add_argument('--wandb-run-name',
+                      help='W&B run name',
+                      type=str, default=None)
+  parser.add_argument('--wandb-tags',
+                      help='comma-separated W&B tags',
+                      type=str, default=None)
+  parser.add_argument('--wandb-notes',
+                      help='W&B run notes',
+                      type=str, default=None)
   args = parser.parse_args()
   config = yaml.load(open(args.config, 'r'), Loader=yaml.FullLoader)
   
