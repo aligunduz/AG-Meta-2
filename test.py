@@ -66,12 +66,17 @@ class WandbLogger(object):
     if self.run is not None:
       self.run.summary['run_name'] = wandb_run_name
       self.run.summary['checkpoint_path'] = config.get('load')
+    self._wandb.define_metric('test/epoch')
+    self._wandb.define_metric('test/*', step_metric='test/epoch')
+    self._wandb.define_metric(
+      'gradient_transport/*', step_metric='test/epoch')
+    self._wandb.define_metric('task_gate/*', step_metric='test/epoch')
     utils.log('wandb: enabled project={} name={} mode={}'.format(
       project, wandb_run_name, mode))
 
-  def log(self, metrics, step=None):
+  def log(self, metrics):
     if self.enabled:
-      self._wandb.log(metrics, step=step)
+      self._wandb.log(self._sanitize_metrics(metrics))
 
   def set_summary(self, key, value):
     if self.enabled and self.run is not None:
@@ -80,6 +85,19 @@ class WandbLogger(object):
   def finish(self):
     if self.enabled:
       self._wandb.finish()
+
+  @staticmethod
+  def _sanitize_metrics(metrics):
+    clean = {}
+    for key, value in metrics.items():
+      if value is None:
+        continue
+      if isinstance(value, np.generic):
+        value = value.item()
+      elif torch.is_tensor(value):
+        value = value.detach().cpu().item()
+      clean[key] = value
+    return clean
 
 
 def make_test_run_name(config, ckpt_config):
@@ -215,11 +233,12 @@ def main(config):
     print('test epoch {}: acc={:.2f} +- {:.2f} (%)'.format(
       epoch, aves_va.item() * 100, 
       utils.mean_confidence_interval(va_lst) * 100))
-    ci95 = utils.mean_confidence_interval(va_lst)
+    ci95 = float(utils.mean_confidence_interval(va_lst))
+    acc_mean = float(aves_va.item())
     wandb_logger.log({
       'test/epoch': epoch,
-      'test/accuracy': aves_va.item(),
-      'test/accuracy_percent': aves_va.item() * 100,
+      'test/accuracy': acc_mean,
+      'test/accuracy_percent': acc_mean * 100,
       'test/confidence_interval_95': ci95,
       'test/confidence_interval_95_percent': ci95 * 100,
       'test/n_way': config['test']['n_way'],
@@ -229,11 +248,19 @@ def main(config):
       'test/n_batch': config['test'].get('n_batch'),
       'gradient_transport/enabled': int(bool(use_gradient_transport)),
       'task_gate/enabled': int(bool(task_gate_args.get('enabled', False))),
-    }, step=epoch)
+    })
 
-  final_ci95 = utils.mean_confidence_interval(va_lst)
-  wandb_logger.set_summary('test/accuracy', aves_va.item())
-  wandb_logger.set_summary('test/accuracy_percent', aves_va.item() * 100)
+  final_ci95 = float(utils.mean_confidence_interval(va_lst))
+  final_acc = float(aves_va.item())
+  wandb_logger.log({
+    'test/epoch': config['epoch'] + 1,
+    'test/final_accuracy': final_acc,
+    'test/final_accuracy_percent': final_acc * 100,
+    'test/final_confidence_interval_95': final_ci95,
+    'test/final_confidence_interval_95_percent': final_ci95 * 100,
+  })
+  wandb_logger.set_summary('test/accuracy', final_acc)
+  wandb_logger.set_summary('test/accuracy_percent', final_acc * 100)
   wandb_logger.set_summary('test/confidence_interval_95', final_ci95)
   wandb_logger.set_summary(
     'test/confidence_interval_95_percent', final_ci95 * 100)
